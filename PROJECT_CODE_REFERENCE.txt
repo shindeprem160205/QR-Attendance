@@ -1,0 +1,354 @@
+================================================================================
+  QR ATTENDANCE SYSTEM — CODE & MODULE REFERENCE (PER FILE)
+================================================================================
+Generated for the project source files (excluding .venv and generated DB).
+To make a PDF: open this file in Notepad / browser and use Print → Save as PDF.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+  1. app.py
+  2. config.py
+  3. models.py
+  4. static/js/scanner.js
+  5. static/css/style.css
+  6. templates (Jinja2 HTML)
+  7. Deployment & config files (non-Python)
+  8. Route map (Flask endpoints → view functions)
+
+================================================================================
+1. FILE: app.py
+================================================================================
+ROLE: Main Flask application — routes, auth, admin/student flows, QR API, CLI.
+
+--- Standard library imports ---
+  __future__.annotations     Future annotations (PEP 563 style hints).
+  csv                        Writing CSV rows for export.
+  io                         BytesIO / StringIO for in-memory files (QR PNG, CSV).
+  os                         Filesystem: ensure Flask instance_path exists.
+  secrets                    token_hex() for CSRF tokens.
+  datetime.datetime          UTC timestamps for QR, attendance, export filename.
+  functools.wraps            Preserve metadata on decorated route wrappers.
+
+--- Third-party / framework imports ---
+  click                      CLI options for create-admin command.
+  qrcode                     qrcode.make() to build QR images from payload string.
+  sqlalchemy.exc.IntegrityError   Catch duplicate attendance at DB level.
+  dotenv.load_dotenv()       Load .env into environment (called once at startup).
+  flask.Flask                Application object `app`.
+  flask.flash                One-time messages to the user.
+  flask.jsonify              JSON responses for /student/mark API.
+  flask.redirect             HTTP redirects after POST / auth.
+  flask.render_template      Render Jinja2 HTML templates.
+  flask.request              Form data, JSON body, query args, headers.
+  flask.send_file            Stream PNG and CSV downloads.
+  flask.session              Signed cookie session (user_id, csrf_token).
+  flask.url_for              Reverse URL generation for redirects and templates.
+  werkzeug.security.check_password_hash   Verify login password.
+  werkzeug.security.generate_password_hash Hash passwords on register / create-admin.
+
+--- Local project imports ---
+  config.Config              Flask config class (loaded via app.config.from_object).
+  models.Attendance          ORM model for attendance rows.
+  models.LectureSession      ORM model for class sessions (QR session_id).
+  models.User                ORM model for users (student/admin).
+  models.db                  Flask-SQLAlchemy instance; db.session, db.init_app.
+
+--- Global / module-level objects ---
+  app                        Flask(__name__); main WSGI application (gunicorn: app:app).
+  _instance                  Path string: Flask app.instance_path.
+  (side effect) os.makedirs(_instance, exist_ok=True)  Ensures instance folder exists.
+
+--- Functions & decorators (definitions) ---
+
+  @app.context_processor
+  inject_current_user()
+      Returns dict {"user": current_user()} for all Jinja templates.
+
+  _refresh_csrf() -> None
+      Sets session["csrf_token"] to secrets.token_hex(16).
+
+  _validate_csrf() -> bool
+      Compares form field csrf_token or header X-CSRF-Token to session value.
+
+  login_required(fn)
+      Decorator: if no session["user_id"], flash + redirect to login with ?next=.
+
+  admin_required(fn)
+      Decorator: requires login + User.role == "admin"; else redirect student_dashboard.
+
+  current_user() -> User | None
+      Loads User by session["user_id"] or returns None.
+
+  build_qr_payload(session_id: str) -> str
+      Returns "session_id|unix_timestamp_utc" for embedding in QR.
+
+  parse_qr_payload(raw: str) -> tuple[str, int] | None
+      Parses QR string into (session_id, ts); None if invalid.
+
+  validate_qr_scan(session_id: str, embedded_ts: int) -> tuple[bool, str]
+      Checks LectureSession exists and |now_ts - embedded_ts| <= QR_VALIDITY_SECONDS.
+
+  @app.cli.command("init-db")
+  init_db_command()
+      Flask CLI: db.create_all() inside app context; prints confirmation.
+
+  @app.cli.command("create-admin") + @click.option(...) x3
+  create_admin_command(email, password, name)
+      Flask CLI: inserts User with role admin if email not taken.
+
+  --- Route view functions (Flask @app.route) ---
+
+  index()                         GET  /          Redirect by role or to login.
+  login()                         GET/POST /login
+  register()                      GET/POST /register
+  logout()                        GET  /logout
+  admin_dashboard()               GET  /admin
+  admin_create_session()          POST /admin/session/create
+  admin_session_qr(session_id)    GET  /admin/session/<session_id>
+  admin_session_qr_image(session_id) GET /admin/session/<session_id>/qr.png
+  admin_attendance()              GET  /admin/attendance
+  admin_export_csv()              GET  /admin/export.csv
+  student_dashboard()             GET  /student
+  student_mark()                  POST /student/mark   (JSON API for scanner)
+
+  --- Error handlers ---
+
+  not_found(e)                    @app.errorhandler(404) → errors/404.html
+  server_error(e)                 @app.errorhandler(500) → errors/500.html
+
+--- Startup block ---
+  with app.app_context(): db.create_all()
+      Ensures tables exist when the app module loads (SQLite or PostgreSQL).
+
+--- Inner functions (closures) ---
+  login_required.wrapper        Checks session user_id before calling route.
+  admin_required.wrapper        Checks session + admin role before calling route.
+
+--- Variables of note inside routes ---
+  admin_attendance: assigns my_sessions (set of session ids) but current template
+      does not use it — reserved or leftover; rows query drives the page.
+
+================================================================================
+2. FILE: config.py
+================================================================================
+ROLE: Central configuration from environment variables; SQLite path helper.
+
+--- Standard library ---
+  os                         getenv, path join, makedirs, dirname, abspath.
+  datetime.timedelta         PERMANENT_SESSION_LIFETIME for Flask sessions.
+
+--- Module-level ---
+  BASE_DIR                   Absolute path to directory containing config.py.
+
+--- Functions ---
+  _normalize_database_url(url: str) -> str
+      Rewrites postgres:// → postgresql:// for SQLAlchemy 2.x.
+
+--- Class ---
+  class Config
+      Class body assigns (at import time):
+        SECRET_KEY                    From env or dev default string.
+        SQLALCHEMY_DATABASE_URI       DATABASE_URL normalized, OR SQLite file URI.
+        SQLALCHEMY_TRACK_MODIFICATIONS False (Flask-SQLAlchemy recommendation).
+        PERMANENT_SESSION_LIFETIME    timedelta from SESSION_TIMEOUT_MINUTES (default 60).
+        QR_VALIDITY_SECONDS           int from env (default 300).
+        ADMIN_REGISTRATION_SECRET     str from env or None if empty.
+
+      Side effect: if no DATABASE_URL, creates BASE_DIR/instance/ and points SQLite there.
+
+================================================================================
+3. FILE: models.py
+================================================================================
+ROLE: Database schema as SQLAlchemy ORM models.
+
+--- Standard library ---
+  uuid                       uuid.uuid4() for string session primary keys.
+  datetime.datetime          Default factory for LectureSession.created_at.
+
+--- Third-party ---
+  flask_sqlalchemy.SQLAlchemy  db object (bound to app in app.py).
+
+--- Module-level object ---
+  db                         SQLAlchemy() extension instance.
+
+--- Classes (ORM models) ---
+
+  class User(db.Model)
+      __tablename__ = "users"
+      Columns: id, name, email, password_hash, role.
+      Relationships:
+        sessions_created   → LectureSession (via admin_id / creator backref).
+        attendance_records → Attendance (user backref).
+
+  class LectureSession(db.Model)
+      __tablename__ = "lecture_sessions"
+      Columns: id (str UUID PK, default on insert), title, admin_id (FK users.id),
+               created_at.
+      Relationship: attendance_rows → Attendance (lecture_session backref).
+
+  class Attendance(db.Model)
+      __tablename__ = "attendance"
+      Columns: id, user_id (FK), session_id (FK lecture_sessions.id),
+               date, time.
+      __table_args__: UniqueConstraint(user_id, session_id) name uq_attendance_user_session.
+
+================================================================================
+4. FILE: static/js/scanner.js
+================================================================================
+ROLE: Client-side QR scanning and POST to Flask; IIFE (no global exports).
+
+--- External dependency (not in this file; loaded by template) ---
+  Html5Qrcode                 Constructor from html5-qrcode.min.js (unpkg CDN).
+  Html5Qrcode.getCameras()    Enumerate video input devices.
+
+--- Browser APIs used ---
+  document.getElementById     Get #reader, #btnStart, #btnStop, #scanMessage.
+  document.querySelector      meta[name="csrf-token"] for CSRF value.
+  meta.getAttribute("content")
+  fetch(url, options)         POST /student/mark with JSON + headers.
+  JSON.stringify              Body { qr_text: "..." }.
+  Response.json / Promise chains  .then / .catch / .finally.
+  addEventListener("click")   Start / stop camera buttons.
+
+--- IIFE-scoped variables ---
+  readerEl, btnStart, btnStop, msgEl, meta, csrf
+  html5QrCode                 new Html5Qrcode("reader")
+  running, busy               Prevent double-submit / double-start.
+
+--- Inner functions ---
+  setMessage(text, kind)      Updates #scanMessage text and ok/err CSS class.
+  submitQr(qrText)            fetch POST to /student/mark with X-CSRF-Token.
+
+--- Event handlers (anonymous functions) ---
+  btnStart click: Html5Qrcode.getCameras → html5QrCode.start(cameraId, config, onSuccess, onError)
+      onSuccess decodes QR → submitQr(decodedText).
+  btnStop click: html5QrCode.stop() → reset buttons and message.
+
+================================================================================
+5. FILE: static/css/style.css
+================================================================================
+ROLE: Presentational stylesheet (no functions — rules, selectors, variables).
+
+--- CSS features used ---
+  Custom properties (--bg, --surface, …) under :root.
+  Flexbox and CSS Grid (.header-inner, .grid-two, .row-between, .stack).
+  @media (min-width: 768px) for responsive two-column layout.
+  Pseudo-classes :hover on links, buttons, logo.
+
+--- Selector groups (main classes) ---
+  Layout & chrome: .container, .site-header, .header-inner, .logo, .nav-links,
+    .main-content, .site-footer, .page-header, .row-between, .link-back
+  Typography utilities: .muted, .small
+  Cards & forms: .card, .auth-card, .center, .grid-two, .stack, label, input types
+  Buttons: .btn, .btn-primary, .btn-secondary, .btn-ghost, .btn-sm
+  Flash messages: .flash-list, .flash, .flash-success/warning/danger/info
+  Tables: .table-card, .table-wrap, .data-table
+  Lists: .tips
+  QR page: .qr-card, .qr-frame, .qr-frame img
+  Scanner: .scanner-wrap, .scanner-wrap video, .scanner-actions, .scan-message,
+    .scan-message.ok, .scan-message.err
+
+================================================================================
+6. TEMPLATES (Jinja2 HTML)
+================================================================================
+
+--- templates/base.html ---
+  Extends: (root layout — none)
+  Blocks: title, head_extra, content, scripts
+  Flask/Jinja: url_for('static', filename='css/style.css'), url_for('index'),
+    url_for('admin_dashboard'), url_for('admin_attendance'), url_for('student_dashboard'),
+    url_for('logout'), session.get('user_id'), session.get('csrf_token'),
+    user, user.role, get_flashed_messages(with_categories=true)
+
+--- templates/login.html ---
+  extends base.html
+  blocks: title, content
+  url_for('login'), url_for('register')
+  Form: POST email, password, hidden csrf_token
+
+--- templates/register.html ---
+  extends base.html
+  blocks: title, content
+  url_for('register'), url_for('login')
+  Variables: admin_secret_enabled
+  Form: name, email, password, confirm, optional admin_secret, csrf_token
+
+--- templates/admin/dashboard.html ---
+  extends base.html
+  blocks: title, content
+  Variables: user, sessions, qr_ttl_sec
+  url_for: admin_create_session, admin_attendance, admin_export_csv, admin_session_qr
+
+--- templates/admin/session_qr.html ---
+  extends base.html
+  blocks: title, content, scripts
+  Variables: lecture, qr_ttl_sec, refresh_interval_ms
+  url_for: admin_dashboard, admin_session_qr_image
+  Inline script: setInterval refresh of <img> with cache-busting query param
+
+--- templates/admin/attendance.html ---
+  extends base.html
+  blocks: title, content
+  Variables: user, rows (tuples of Attendance, User, LectureSession)
+  url_for: admin_export_csv
+  Jinja: for att, student, lec in rows — date.isoformat(), time.strftime
+
+--- templates/student/dashboard.html ---
+  extends base.html
+  blocks: title, head_extra, content, scripts
+  External script: https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js (defer)
+  Local script: url_for('static', filename='js/scanner.js') (defer)
+  Variables: user, history, qr_ttl_sec
+  DOM ids used by scanner.js: reader, btnStart, btnStop, scanMessage
+
+--- templates/errors/404.html ---
+  extends base.html; url_for('index')
+
+--- templates/errors/500.html ---
+  extends base.html; url_for('index')
+
+================================================================================
+7. OTHER PROJECT FILES (REFERENCE)
+================================================================================
+
+requirements.txt
+  Lists pip packages: Flask, click, Flask-SQLAlchemy, psycopg2-binary, python-dotenv,
+  qrcode[pil], gunicorn, Werkzeug (exact versions pinned).
+
+Procfile
+  Declares process type: web: gunicorn app:app
+  (gunicorn loads WSGI callable `app` from Python module `app`.)
+
+runtime.txt
+  Suggested Python runtime string for hosts like Render (e.g. python-3.11.9).
+
+.env.example
+  Documents optional env vars: SECRET_KEY, DATABASE_URL, ADMIN_REGISTRATION_SECRET,
+  SESSION_TIMEOUT_MINUTES, QR_VALIDITY_SECONDS (not executable code).
+
+README.md
+  Human documentation for setup and deploy (not code).
+
+.gitignore
+  Patterns for venv, .env, __pycache__, *.db, IDE folders.
+
+================================================================================
+8. ROUTE MAP (app.py)
+================================================================================
+  GET  /                              → index
+  GET/POST /login                     → login
+  GET/POST /register                  → register
+  GET  /logout                        → logout
+  GET  /admin                         → admin_dashboard
+  POST /admin/session/create          → admin_create_session
+  GET  /admin/session/<session_id>    → admin_session_qr
+  GET  /admin/session/<session_id>/qr.png → admin_session_qr_image
+  GET  /admin/attendance              → admin_attendance
+  GET  /admin/export.csv              → admin_export_csv
+  GET  /student                       → student_dashboard
+  POST /student/mark                  → student_mark (JSON)
+
+================================================================================
+END OF REFERENCE
+================================================================================
